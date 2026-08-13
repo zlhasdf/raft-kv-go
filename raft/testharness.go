@@ -1,7 +1,9 @@
+// 用于编写 Raft 测试的测试框架（harness）。
 package raft
 
 import (
 	"log"
+	"sync"
 	"testing"
 	"time"
 )
@@ -11,13 +13,18 @@ func init() {
 }
 
 type Harness struct {
-	// cluster is a list of all the raft servers participating in a cluster.
+	mu sync.Mutex
+
 	// cluster 是参与同一个集群的所有 raft 服务器列表。
 	cluster []*Server
 
-	// connected has a bool per server in cluster, specifying whether this server
-	// is currently connected to peers (if false, it's partitioned and no messages
-	// will pass to or from it).
+	// commitChans 中为集群中的每个服务器保存一个通道，即该服务器的提交通道。
+	commitChans []chan CommitEntry
+
+	// commits 中索引 i 处保存服务器 i 到目前为止提交的条目序列。它由监听对应
+	// commitChans 通道的 goroutine 填充。
+	commits [][]CommitEntry
+
 	// connected 为集群中的每个服务器保存一个布尔值，表示该服务器当前是否与
 	// 对等节点保持连接（若为 false，则它已被分区，任何消息都无法进出）。
 	connected []bool
@@ -26,15 +33,14 @@ type Harness struct {
 	t *testing.T
 }
 
-// NewHarness creates a new test Harness, initialized with n servers connected
-// to each other.
 // NewHarness 创建一个新的测试 Harness，初始化为 n 个相互连接的服务器。
 func NewHarness(t *testing.T, n int) *Harness {
 	ns := make([]*Server, n)
 	connected := make([]bool, n)
+	commitChans := make([]chan CommitEntry, n)
+	commits := make([][]CommitEntry, n)
 	ready := make(chan any)
 
-	// Create all Servers in this cluster, assign ids and peer ids.
 	// 创建该集群中的所有服务器，并分配 id 和对等节点 id。
 	for i := 0; i < n; i++ {
 		peerIds := make([]int, 0)
@@ -44,11 +50,11 @@ func NewHarness(t *testing.T, n int) *Harness {
 			}
 		}
 
-		ns[i] = NewServer(i, peerIds, ready)
+		commitChans[i] = make(chan CommitEntry)
+		ns[i] = NewServer(i, peerIds, ready, commitChans[i])
 		ns[i].Serve()
 	}
 
-	// Connect all peers to each other.
 	// 将所有对等节点相互连接。
 	for i := 0; i < n; i++ {
 		for j := 0; j < n; j++ {
@@ -60,16 +66,20 @@ func NewHarness(t *testing.T, n int) *Harness {
 	}
 	close(ready)
 
-	return &Harness{
-		cluster:   ns,
-		connected: connected,
-		n:         n,
-		t:         t,
+	h := &Harness{
+		cluster:     ns,
+		commitChans: commitChans,
+		commits:     commits,
+		connected:   connected,
+		n:           n,
+		t:           t,
 	}
+	for i := 0; i < n; i++ {
+		go h.collectCommits(i)
+	}
+	return h
 }
 
-// Shutdown shuts down all the servers in the harness and waits for them to
-// stop running.
 // Shutdown 关闭 harness 中的所有服务器，并等待它们停止运行。
 func (h *Harness) Shutdown() {
 	for i := 0; i < h.n; i++ {
@@ -79,9 +89,11 @@ func (h *Harness) Shutdown() {
 	for i := 0; i < h.n; i++ {
 		h.cluster[i].Shutdown()
 	}
+	for i := 0; i < h.n; i++ {
+		close(h.commitChans[i])
+	}
 }
 
-// DisconnectPeer disconnects a server from all other servers in the cluster.
 // DisconnectPeer 将一个服务器与集群中的所有其他服务器断开连接。
 func (h *Harness) DisconnectPeer(id int) {
 	tlog("Disconnect %d", id)
@@ -94,7 +106,6 @@ func (h *Harness) DisconnectPeer(id int) {
 	h.connected[id] = false
 }
 
-// ReconnectPeer connects a server to all other servers in the cluster.
 // ReconnectPeer 将一个服务器与集群中的所有其他服务器重新连接。
 func (h *Harness) ReconnectPeer(id int) {
 	tlog("Reconnect %d", id)
@@ -111,9 +122,6 @@ func (h *Harness) ReconnectPeer(id int) {
 	h.connected[id] = true
 }
 
-// CheckSingleLeader checks that only a single server thinks it's the leader.
-// Returns the leader's id and term. It retries several times if no leader is
-// identified yet.
 // CheckSingleLeader 检查是否只有一个服务器认为自己是 leader。
 // 返回 leader 的 id 和任期。如果尚未识别出 leader，它会重试若干次。
 func (h *Harness) CheckSingleLeader() (int, int) {
@@ -143,7 +151,6 @@ func (h *Harness) CheckSingleLeader() (int, int) {
 	return -1, -1
 }
 
-// CheckNoLeader checks that no connected server considers itself the leader.
 // CheckNoLeader 检查没有任何已连接的服务器认为自己是 leader。
 func (h *Harness) CheckNoLeader() {
 	for i := 0; i < h.n; i++ {
@@ -163,4 +170,15 @@ func tlog(format string, a ...any) {
 
 func sleepMs(n int) {
 	time.Sleep(time.Duration(n) * time.Millisecond)
+}
+
+// collectCommits 读取通道 commitChans[i]，并将收到的所有条目添加到对应的
+// commits[i] 中。它是阻塞式的，应在单独的 goroutine 中运行；当 commitChans[i]
+// 被关闭时返回。
+func (h *Harness) collectCommits(i int) {
+	for c := range h.commitChans[i] {
+		h.mu.Lock()
+		h.commits[i] = append(h.commits[i], c)
+		h.mu.Unlock()
+	}
 }

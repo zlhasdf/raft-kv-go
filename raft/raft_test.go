@@ -42,12 +42,10 @@ func TestElectionLeaderAndAnotherDisconnect(t *testing.T) {
 	otherId := (origLeaderId + 1) % 3
 	h.DisconnectPeer(otherId)
 
-	// No quorum.
 	// 没有法定人数（quorum）。
 	sleepMs(450)
 	h.CheckNoLeader()
 
-	// Reconnect one other server; now we'll have quorum.
 	// 重新连接另一个服务器；现在我们将拥有法定人数。
 	h.ReconnectPeer(otherId)
 	h.CheckSingleLeader()
@@ -58,7 +56,6 @@ func TestDisconnectAllThenRestore(t *testing.T) {
 	defer h.Shutdown()
 
 	sleepMs(100)
-	//	Disconnect all servers from the start. There will be no leader.
 	// 从一开始就断开所有服务器。将不会有 leader。
 	for i := 0; i < 3; i++ {
 		h.DisconnectPeer(i)
@@ -66,7 +63,6 @@ func TestDisconnectAllThenRestore(t *testing.T) {
 	sleepMs(450)
 	h.CheckNoLeader()
 
-	// Reconnect all servers. A leader will be found.
 	// 重新连接所有服务器。将会选出一个 leader。
 	for i := 0; i < 3; i++ {
 		h.ReconnectPeer(i)
@@ -136,9 +132,6 @@ func TestElectionFollowerComesBack(t *testing.T) {
 	h.ReconnectPeer(otherId)
 	sleepMs(150)
 
-	// We can't have an assertion on the new leader id here because it depends
-	// on the relative election timeouts. We can assert that the term changed,
-	// however, which implies that re-election has occurred.
 	// 这里无法对新的 leader id 做断言，因为它取决于各服务器相对的超时时间。
 	// 不过我们可以断言任期发生了变化，这暗示发生了重新选举。
 	_, newTerm := h.CheckSingleLeader()
@@ -162,12 +155,10 @@ func TestElectionDisconnectLoop(t *testing.T) {
 		sleepMs(310)
 		h.CheckNoLeader()
 
-		// Reconnect both.
 		// 重新连接两者。
 		h.ReconnectPeer(otherId)
 		h.ReconnectPeer(leaderId)
 
-		// Give it time to settle
 		// 给它一些时间稳定下来
 		sleepMs(150)
 	}
